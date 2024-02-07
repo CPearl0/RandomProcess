@@ -2,18 +2,29 @@ package com.cpearl.randomprocess;
 
 import dev.latvian.mods.kubejs.recipe.RecipesEventJS;
 import dev.latvian.mods.kubejs.util.ConsoleJS;
-import net.minecraft.world.item.ItemStack;
 
 import java.util.*;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 public class RandomProcessKubeJSBindings {
     public List<Stage> stages = new ArrayList<>();
     public Stage finalStage;
     public Stage initialStage;
-    private Random random;
+    private final Random random = new Random();
+    private static long savedSeed;
 
+    public void saveSeed(Long seed) {
+        savedSeed = seed;
+    }
+    public long getSavedSeed() {
+        return savedSeed;
+    }
     public void setSeed(Long seed) {
-        this.random = new Random(seed);
+        this.random.setSeed(seed);
+    }
+    public void setSeedToSaved() {
+        setSeed(savedSeed);
     }
 
     public void addStage(Stage ...stages) {
@@ -38,45 +49,62 @@ public class RandomProcessKubeJSBindings {
         }
         return newList;
     }
-    public void generateRandomProcess(RecipesEventJS event) {
-        var stages = shuffle(this.stages);
-        int stageCount = stages.size(), processedStageCount = 0;
-        var waitForAddChildStages = new ArrayList<Stage>();
-        var nextWaitForAddChildStages = new ArrayList<Stage>();
-
-        ConsoleJS.SERVER.info("Start generating random process.");
-        waitForAddChildStages.add(finalStage);
-        while (!waitForAddChildStages.isEmpty()) {
-            ConsoleJS.SERVER.info("Begin. Waiting: " + waitForAddChildStages.size());
-            for (var stage : waitForAddChildStages) {
-                ConsoleJS.SERVER.info("Begin parent: " + stage.ID);
-                int maxChildren = Math.min(
-                        stageCount - processedStageCount,
-                        stage.defaultStartItems.size()
-                );
-                ConsoleJS.SERVER.info("Max children: " + maxChildren);
-                int children = (maxChildren == 0) ? 0 : (random.nextInt(maxChildren) + 1);
-                ConsoleJS.SERVER.info("Children count: " + children);
-
-                var startItems = new ArrayList<ItemStack>();
-                for (int i = 0; i < children; i++) {
-                    var child = stages.get(processedStageCount++);
-                    ConsoleJS.SERVER.info("Child: " + child.ID);
-                    startItems.add(child.endItem);
-                    nextWaitForAddChildStages.add(child);
-                }
-                var startItemArray = new ItemStack[stage.defaultStartItems.size()];
-                for (int i = 0; i < stage.defaultStartItems.size(); i++) {
-                    if (i < children)
-                        startItemArray[i] = startItems.get(i);
-                    else
-                        startItemArray[i] = stage.defaultStartItems.get(i);
-                }
-                stage.startWith.accept(event, startItemArray);
-                ConsoleJS.SERVER.info("Done parent: " + stage.ID);
-            }
-            waitForAddChildStages = nextWaitForAddChildStages;
-            nextWaitForAddChildStages = new ArrayList<>();
+    private void shuffleInPlace(List<Stage> list) {
+        for (int i = list.size() - 1; i > 0; i--) {
+            int j = random.nextInt(i + 1);
+            var temp = list.get(i);
+            list.set(i, list.get(j));
+            list.set(j, temp);
         }
+    }
+    public void generateRandomProcess(RecipesEventJS event) {
+        ConsoleJS.SERVER.info("Begin generating random process.");
+        var stageList = new ArrayList<>(stages);
+        generateRandomProcessRecursively(event, stageList, finalStage);
+        ConsoleJS.SERVER.info("Finish generating random process.");
+    }
+    private void generateRandomProcessRecursively(RecipesEventJS event, List<Stage> stages, Stage finalStage) {
+        ConsoleJS.SERVER.info("Begin. Parent: " + finalStage.ID);
+
+        // shuffle the list
+        shuffleInPlace(stages);
+
+        // Randomly find the child count
+        int maxChildCount = Math.min(
+                stages.size(),
+                finalStage.defaultStartItems.size()
+        );
+        if (maxChildCount == 0) {
+            ConsoleJS.SERVER.info("End without child. Parent: " + finalStage.ID);
+            return;
+        }
+        int childCount = random.nextInt(1, maxChildCount + 1);
+        ConsoleJS.SERVER.info("Child count: " + childCount);
+
+        // Add to the stages' pointer
+        finalStage.child.addAll(stages.subList(stages.size() - childCount, stages.size()));
+        finalStage.child.forEach(child -> child.parent.add(finalStage));
+        finalStage.child.forEach(child -> ConsoleJS.SERVER.info("Child: " + child.ID));
+
+        // Recursively generate the process tree
+        int splitSize = (stages.size() - childCount) / childCount;
+        int index = 0;
+        for (int i = 0; i < childCount - 1; i++, index += splitSize) {
+            var child = stages.get(stages.size() - childCount + i);
+            generateRandomProcessRecursively(event,
+                    Stream.concat(stages.subList(index, index + splitSize).stream(),
+                            child.dependencies.stream()).collect(Collectors.toList()),
+                    child);
+        }
+        var lastChild = stages.get(stages.size() - 1);
+        generateRandomProcessRecursively(event,
+                Stream.concat(stages.subList(index, stages.size() - childCount).stream(),
+                        lastChild.dependencies.stream()).collect(Collectors.toList()),
+                lastChild);
+
+        // call the startWith function
+        finalStage.doStartWith(event);
+
+        ConsoleJS.SERVER.info("End. Parent: " + finalStage.ID);
     }
 }
